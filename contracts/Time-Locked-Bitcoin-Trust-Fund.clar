@@ -273,3 +273,90 @@
 (define-read-only (get-contract-owner)
   (var-get contract-owner)
 )
+
+(define-map trust-delegations
+  { trust-id: uint }
+  { 
+    delegate: principal,
+    delegated-at: uint,
+    active: bool
+  }
+)
+
+(define-public (delegate-trust (trust-id uint) (delegate principal))
+  (let 
+    (
+      (trust-data (unwrap! (get-trust-info trust-id) ERR-TRUST-NOT-FOUND))
+      (beneficiary (get beneficiary trust-data))
+      (withdrawn (get withdrawn trust-data))
+    )
+    (asserts! (is-eq tx-sender beneficiary) ERR-UNAUTHORIZED)
+    (asserts! (not withdrawn) ERR-TRUST-ALREADY-WITHDRAWN)
+    (asserts! (not (is-eq delegate beneficiary)) ERR-INVALID-AMOUNT)
+    
+    (map-set trust-delegations
+      { trust-id: trust-id }
+      {
+        delegate: delegate,
+        delegated-at: stacks-block-height,
+        active: true
+      }
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (revoke-delegation (trust-id uint))
+  (let 
+    (
+      (trust-data (unwrap! (get-trust-info trust-id) ERR-TRUST-NOT-FOUND))
+      (beneficiary (get beneficiary trust-data))
+      (withdrawn (get withdrawn trust-data))
+    )
+    (asserts! (is-eq tx-sender beneficiary) ERR-UNAUTHORIZED)
+    (asserts! (not withdrawn) ERR-TRUST-ALREADY-WITHDRAWN)
+    
+    (map-delete trust-delegations { trust-id: trust-id })
+    
+    (ok true)
+  )
+)
+
+(define-public (withdraw-as-delegate (trust-id uint))
+  (let 
+    (
+      (trust-data (unwrap! (get-trust-info trust-id) ERR-TRUST-NOT-FOUND))
+      (delegation (unwrap! (map-get? trust-delegations { trust-id: trust-id }) ERR-UNAUTHORIZED))
+      (delegate (get delegate delegation))
+      (amount (get amount trust-data))
+      (unlock-block (get unlock-block-height trust-data))
+      (withdrawn (get withdrawn trust-data))
+      (active (get active delegation))
+    )
+    (asserts! (is-eq tx-sender delegate) ERR-UNAUTHORIZED)
+    (asserts! active ERR-UNAUTHORIZED)
+    (asserts! (not withdrawn) ERR-TRUST-ALREADY-WITHDRAWN)
+    (asserts! (>= stacks-block-height unlock-block) ERR-TRUST-LOCKED)
+    
+    (map-set trusts
+      { trust-id: trust-id }
+      (merge trust-data { withdrawn: true })
+    )
+    
+    (var-set total-value-locked (- (var-get total-value-locked) amount))
+    
+    (as-contract (stx-transfer? amount tx-sender delegate))
+  )
+)
+
+(define-read-only (get-trust-delegation (trust-id uint))
+  (map-get? trust-delegations { trust-id: trust-id })
+)
+
+(define-read-only (is-delegated (trust-id uint))
+  (match (get-trust-delegation trust-id)
+    delegation (get active delegation)
+    false
+  )
+)
