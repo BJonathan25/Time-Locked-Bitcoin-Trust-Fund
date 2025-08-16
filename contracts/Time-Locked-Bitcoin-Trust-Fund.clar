@@ -14,6 +14,10 @@
 (define-data-var total-trusts uint u0)
 (define-data-var total-value-locked uint u0)
 
+(define-constant ERR-NO-BACKUP-BENEFICIARY (err u426))
+(define-constant ERR-INACTIVITY-PERIOD-NOT-MET (err u427))
+(define-constant ERR-BACKUP-ALREADY-NOMINATED (err u428))
+
 (define-map trusts
   { trust-id: uint }
   {
@@ -359,4 +363,100 @@
     delegation (get active delegation)
     false
   )
+)
+
+
+(define-map backup-beneficiaries
+  { trust-id: uint }
+  {
+    backup-beneficiary: principal,
+    inactivity-blocks: uint,
+    nominated-at: uint,
+    last-primary-activity: uint
+  }
+)
+
+(define-public (nominate-backup-beneficiary 
+  (trust-id uint) 
+  (backup-beneficiary principal) 
+  (inactivity-blocks uint)
+)
+  (let 
+    (
+      (trust-data (unwrap! (get-trust-info trust-id) ERR-TRUST-NOT-FOUND))
+      (grantor (get grantor trust-data))
+      (withdrawn (get withdrawn trust-data))
+    )
+    (asserts! (is-eq tx-sender grantor) ERR-UNAUTHORIZED)
+    (asserts! (not withdrawn) ERR-TRUST-ALREADY-WITHDRAWN)
+    (asserts! (> inactivity-blocks u0) ERR-INVALID-UNLOCK-TIME)
+    (asserts! (is-none (map-get? backup-beneficiaries { trust-id: trust-id })) 
+              ERR-BACKUP-ALREADY-NOMINATED)
+    
+    (map-set backup-beneficiaries
+      { trust-id: trust-id }
+      {
+        backup-beneficiary: backup-beneficiary,
+        inactivity-blocks: inactivity-blocks,
+        nominated-at: stacks-block-height,
+        last-primary-activity: stacks-block-height
+      }
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (update-primary-activity (trust-id uint))
+  (let 
+    (
+      (trust-data (unwrap! (get-trust-info trust-id) ERR-TRUST-NOT-FOUND))
+      (beneficiary (get beneficiary trust-data))
+      (backup-data (map-get? backup-beneficiaries { trust-id: trust-id }))
+    )
+    (asserts! (is-eq tx-sender beneficiary) ERR-UNAUTHORIZED)
+    
+    (match backup-data
+      data (map-set backup-beneficiaries
+             { trust-id: trust-id }
+             (merge data { last-primary-activity: stacks-block-height }))
+      true
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (claim-as-backup-beneficiary (trust-id uint))
+  (let 
+    (
+      (trust-data (unwrap! (get-trust-info trust-id) ERR-TRUST-NOT-FOUND))
+      (backup-data (unwrap! (map-get? backup-beneficiaries { trust-id: trust-id }) 
+                            ERR-NO-BACKUP-BENEFICIARY))
+      (backup-beneficiary (get backup-beneficiary backup-data))
+      (inactivity-blocks (get inactivity-blocks backup-data))
+      (last-activity (get last-primary-activity backup-data))
+      (amount (get amount trust-data))
+      (unlock-block (get unlock-block-height trust-data))
+      (withdrawn (get withdrawn trust-data))
+    )
+    (asserts! (is-eq tx-sender backup-beneficiary) ERR-UNAUTHORIZED)
+    (asserts! (not withdrawn) ERR-TRUST-ALREADY-WITHDRAWN)
+    (asserts! (>= stacks-block-height unlock-block) ERR-TRUST-LOCKED)
+    (asserts! (>= (- stacks-block-height last-activity) inactivity-blocks) 
+              ERR-INACTIVITY-PERIOD-NOT-MET)
+    
+    (map-set trusts
+      { trust-id: trust-id }
+      (merge trust-data { withdrawn: true })
+    )
+    
+    (var-set total-value-locked (- (var-get total-value-locked) amount))
+    
+    (as-contract (stx-transfer? amount tx-sender backup-beneficiary))
+  )
+)
+
+(define-read-only (get-backup-beneficiary-info (trust-id uint))
+  (map-get? backup-beneficiaries { trust-id: trust-id })
 )
