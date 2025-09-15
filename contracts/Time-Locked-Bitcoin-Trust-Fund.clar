@@ -460,3 +460,105 @@
 (define-read-only (get-backup-beneficiary-info (trust-id uint))
   (map-get? backup-beneficiaries { trust-id: trust-id })
 )
+
+
+(define-map trust-templates
+  { template-id: uint }
+  {
+    name: (string-ascii 64),
+    creator: principal,
+    default-lock-blocks: uint,
+    category: (string-ascii 32),
+    description: (string-ascii 128),
+    created-at: uint,
+    usage-count: uint,
+    is-public: bool
+  }
+)
+
+(define-data-var total-templates uint u0)
+
+(define-map template-categories
+  { category: (string-ascii 32) }
+  { template-ids: (list 20 uint) }
+)
+
+(define-public (create-template
+  (name (string-ascii 64))
+  (default-lock-blocks uint)
+  (category (string-ascii 32))
+  (description (string-ascii 128))
+  (is-public bool)
+)
+  (let ((template-id (+ (var-get total-templates) u1)))
+    (asserts! (> default-lock-blocks u0) ERR-INVALID-UNLOCK-TIME)
+    (asserts! (> (len name) u0) ERR-INVALID-AMOUNT)
+    
+    (map-set trust-templates
+      { template-id: template-id }
+      {
+        name: name,
+        creator: tx-sender,
+        default-lock-blocks: default-lock-blocks,
+        category: category,
+        description: description,
+        created-at: stacks-block-height,
+        usage-count: u0,
+        is-public: is-public
+      }
+    )
+    
+    (let ((current-category-templates 
+           (default-to (list) 
+             (get template-ids 
+               (map-get? template-categories { category: category })))))
+      (map-set template-categories
+        { category: category }
+        { template-ids: (unwrap-panic (as-max-len? (append current-category-templates template-id) u20)) }
+      )
+    )
+    
+    (var-set total-templates template-id)
+    (ok template-id)
+  )
+)
+
+(define-public (create-trust-from-template
+  (template-id uint)
+  (beneficiary principal)
+  (amount uint)
+  (trust-name (string-ascii 64))
+)
+  (let ((template-data (unwrap! (map-get? trust-templates { template-id: template-id }) ERR-TRUST-NOT-FOUND)))
+    (asserts! (or (get is-public template-data) (is-eq tx-sender (get creator template-data))) ERR-UNAUTHORIZED)
+    
+    (map-set trust-templates
+      { template-id: template-id }
+      (merge template-data { usage-count: (+ (get usage-count template-data) u1) })
+    )
+    
+    (create-trust 
+      beneficiary 
+      amount 
+      (+ stacks-block-height (get default-lock-blocks template-data))
+      trust-name
+    )
+  )
+)
+
+(define-read-only (get-template-info (template-id uint))
+  (map-get? trust-templates { template-id: template-id })
+)
+
+(define-read-only (get-templates-by-category (category (string-ascii 32)))
+  (default-to 
+    { template-ids: (list) }
+    (map-get? template-categories { category: category })
+  )
+)
+
+(define-read-only (get-template-stats)
+  {
+    total-templates: (var-get total-templates)
+  }
+)
