@@ -562,3 +562,121 @@
     total-templates: (var-get total-templates)
   }
 )
+
+
+(define-constant ERR-MILESTONE-NOT-REACHED (err u429))
+(define-constant ERR-MILESTONE-ALREADY-CLAIMED (err u430))
+(define-constant ERR-INVALID-MILESTONE-CONFIG (err u431))
+
+(define-map trust-milestones
+  { trust-id: uint }
+  {
+    total-milestones: uint,
+    milestones-claimed: uint
+  }
+)
+
+(define-map milestone-releases
+  { trust-id: uint, milestone-index: uint }
+  {
+    unlock-block-height: uint,
+    percentage: uint,
+    claimed: bool,
+    description: (string-ascii 64)
+  }
+)
+
+(define-private (store-milestone-at-index
+  (index uint)
+  (context { trust-id: uint, blocks: (list 5 uint), percentages: (list 5 uint), descriptions: (list 5 (string-ascii 64)) })
+)
+  (begin
+    (map-set milestone-releases
+      { trust-id: (get trust-id context), milestone-index: index }
+      {
+        unlock-block-height: (default-to u0 (element-at? (get blocks context) index)),
+        percentage: (default-to u0 (element-at? (get percentages context) index)),
+        claimed: false,
+        description: (default-to "" (element-at? (get descriptions context) index))
+      }
+    )
+    context
+  )
+)
+
+(define-public (configure-milestones
+  (trust-id uint)
+  (milestone-blocks (list 5 uint))
+  (milestone-percentages (list 5 uint))
+  (milestone-descriptions (list 5 (string-ascii 64)))
+)
+  (let
+    (
+      (trust-data (unwrap! (get-trust-info trust-id) ERR-TRUST-NOT-FOUND))
+      (grantor (get grantor trust-data))
+      (withdrawn (get withdrawn trust-data))
+      (total-milestones (len milestone-blocks))
+      (total-percentage (fold + milestone-percentages u0))
+    )
+    (asserts! (is-eq tx-sender grantor) ERR-UNAUTHORIZED)
+    (asserts! (not withdrawn) ERR-TRUST-ALREADY-WITHDRAWN)
+    (asserts! (is-eq (len milestone-blocks) (len milestone-percentages)) ERR-INVALID-MILESTONE-CONFIG)
+    (asserts! (is-eq total-percentage u100) ERR-INVALID-MILESTONE-CONFIG)
+    (asserts! (is-none (map-get? trust-milestones { trust-id: trust-id })) ERR-INVALID-MILESTONE-CONFIG)
+    
+    (map-set trust-milestones
+      { trust-id: trust-id }
+      { total-milestones: total-milestones, milestones-claimed: u0 }
+    )
+    
+    (fold store-milestone-at-index
+      (list u0 u1 u2 u3 u4)
+      { trust-id: trust-id, blocks: milestone-blocks, percentages: milestone-percentages, descriptions: milestone-descriptions }
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (claim-milestone (trust-id uint) (milestone-index uint))
+  (let
+    (
+      (trust-data (unwrap! (get-trust-info trust-id) ERR-TRUST-NOT-FOUND))
+      (beneficiary (get beneficiary trust-data))
+      (trust-amount (get amount trust-data))
+      (withdrawn (get withdrawn trust-data))
+      (milestone-data (unwrap! (map-get? milestone-releases { trust-id: trust-id, milestone-index: milestone-index }) ERR-MILESTONE-NOT-REACHED))
+      (unlock-block (get unlock-block-height milestone-data))
+      (percentage (get percentage milestone-data))
+      (already-claimed (get claimed milestone-data))
+      (release-amount (/ (* trust-amount percentage) u100))
+    )
+    (asserts! (is-eq tx-sender beneficiary) ERR-UNAUTHORIZED)
+    (asserts! (not withdrawn) ERR-TRUST-ALREADY-WITHDRAWN)
+    (asserts! (not already-claimed) ERR-MILESTONE-ALREADY-CLAIMED)
+    (asserts! (>= stacks-block-height unlock-block) ERR-MILESTONE-NOT-REACHED)
+    
+    (map-set milestone-releases
+      { trust-id: trust-id, milestone-index: milestone-index }
+      (merge milestone-data { claimed: true })
+    )
+    
+    (let ((milestone-info (unwrap-panic (map-get? trust-milestones { trust-id: trust-id }))))
+      (map-set trust-milestones
+        { trust-id: trust-id }
+        (merge milestone-info { milestones-claimed: (+ (get milestones-claimed milestone-info) u1) })
+      )
+    )
+    
+    (var-set total-value-locked (- (var-get total-value-locked) release-amount))
+    (as-contract (stx-transfer? release-amount tx-sender beneficiary))
+  )
+)
+
+(define-read-only (get-milestone-info (trust-id uint) (milestone-index uint))
+  (map-get? milestone-releases { trust-id: trust-id, milestone-index: milestone-index })
+)
+
+(define-read-only (get-trust-milestone-progress (trust-id uint))
+  (map-get? trust-milestones { trust-id: trust-id })
+)
