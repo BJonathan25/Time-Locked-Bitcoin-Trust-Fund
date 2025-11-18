@@ -18,6 +18,12 @@
 (define-constant ERR-INACTIVITY-PERIOD-NOT-MET (err u427))
 (define-constant ERR-BACKUP-ALREADY-NOMINATED (err u428))
 
+(define-constant ERR-SCHEDULE-NOT-FOUND (err u404))
+(define-constant ERR-INVALID-INTERVAL (err u432))
+(define-constant ERR-SCHEDULE-PAUSED (err u433))
+(define-constant ERR-TOO-EARLY (err u434))
+(define-constant ERR-SCHEDULE-EXISTS (err u435))
+
 (define-map trusts
   { trust-id: uint }
   {
@@ -679,4 +685,106 @@
 
 (define-read-only (get-trust-milestone-progress (trust-id uint))
   (map-get? trust-milestones { trust-id: trust-id })
+)
+
+
+(define-map recurring-schedules
+  { trust-id: uint }
+  {
+    grantor: principal,
+    deposit-amount: uint,
+    interval-blocks: uint,
+    next-deposit-block: uint,
+    total-deposits-made: uint,
+    is-active: bool,
+    created-at: uint
+  }
+)
+
+(define-read-only (get-schedule-info (trust-id uint))
+  (map-get? recurring-schedules { trust-id: trust-id })
+)
+
+(define-read-only (is-deposit-due (trust-id uint))
+  (match (get-schedule-info trust-id)
+    schedule
+      (and 
+        (get is-active schedule)
+        (>= stacks-block-height (get next-deposit-block schedule))
+      )
+    false
+  )
+)
+
+(define-public (setup-recurring-deposit
+  (trust-id uint)
+  (deposit-amount uint)
+  (interval-blocks uint)
+)
+  (begin
+    (asserts! (is-eq tx-sender contract-caller) ERR-UNAUTHORIZED)
+    (asserts! (> deposit-amount u0) ERR-INVALID-AMOUNT)
+    (asserts! (> interval-blocks u0) ERR-INVALID-INTERVAL)
+    (asserts! (is-none (get-schedule-info trust-id)) ERR-SCHEDULE-EXISTS)
+    
+    (map-set recurring-schedules
+      { trust-id: trust-id }
+      {
+        grantor: tx-sender,
+        deposit-amount: deposit-amount,
+        interval-blocks: interval-blocks,
+        next-deposit-block: (+ stacks-block-height interval-blocks),
+        total-deposits-made: u0,
+        is-active: true,
+        created-at: stacks-block-height
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-public (execute-scheduled-deposit (trust-id uint))
+  (let
+    (
+      (schedule (unwrap! (get-schedule-info trust-id) ERR-SCHEDULE-NOT-FOUND))
+      (grantor (get grantor schedule))
+      (amount (get deposit-amount schedule))
+      (interval (get interval-blocks schedule))
+      (is-active (get is-active schedule))
+      (next-block (get next-deposit-block schedule))
+    )
+    (asserts! is-active ERR-SCHEDULE-PAUSED)
+    (asserts! (>= stacks-block-height next-block) ERR-TOO-EARLY)
+    (asserts! (>= (stx-get-balance grantor) amount) ERR-INSUFFICIENT-BALANCE)
+    
+    (map-set recurring-schedules
+      { trust-id: trust-id }
+      (merge schedule 
+        { 
+          next-deposit-block: (+ stacks-block-height interval),
+          total-deposits-made: (+ (get total-deposits-made schedule) u1)
+        }
+      )
+    )
+    (ok true)
+  )
+)
+
+(define-public (pause-schedule (trust-id uint))
+  (let ((schedule (unwrap! (get-schedule-info trust-id) ERR-SCHEDULE-NOT-FOUND)))
+    (asserts! (is-eq tx-sender (get grantor schedule)) ERR-UNAUTHORIZED)
+    (map-set recurring-schedules { trust-id: trust-id } (merge schedule { is-active: false }))
+    (ok true)
+  )
+)
+
+(define-public (resume-schedule (trust-id uint))
+  (let ((schedule (unwrap! (get-schedule-info trust-id) ERR-SCHEDULE-NOT-FOUND)))
+    (asserts! (is-eq tx-sender (get grantor schedule)) ERR-UNAUTHORIZED)
+    (map-set recurring-schedules 
+      { trust-id: trust-id } 
+      (merge schedule { is-active: true, next-deposit-block: (+ stacks-block-height (get interval-blocks schedule)) })
+    )
+    (ok true)
+  )
 )
